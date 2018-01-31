@@ -52,6 +52,8 @@ type SessionData struct {
 	// SequenceState gives access to the SQL sequences that have been manipulated
 	// by the session.
 	SequenceState *SequenceState
+	// ShuffleUnorderedResults shuffles unordered queries.
+	ShuffleUnorderedResults bool
 
 	mu struct {
 		syncutil.Mutex

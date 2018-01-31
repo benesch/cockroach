@@ -379,6 +379,24 @@ var varGen = map[string]sessionVar{
 		Get: func(evalCtx *extendedEvalContext) string { return evalCtx.SessionData.User },
 	},
 
+	// CockroachDB extension.
+	`shuffle_unordered_results`: {
+		Get: func(evalCtx *extendedEvalContext) string {
+			return strconv.FormatBool(evalCtx.SessionData.ShuffleUnorderedResults)
+		},
+		Set: func(
+			_ context.Context, m sessionDataMutator,
+			evalCtx *extendedEvalContext, values []tree.TypedExpr,
+		) error {
+			b, err := getSingleBool("shuffle_unordered_results", evalCtx, values)
+			if err != nil {
+				return err
+			}
+			m.SetShuffleUnorderedResults(b == tree.DBoolTrue)
+			return nil
+		},
+	},
+
 	// Supported for PG compatibility only.
 	// See https://www.postgresql.org/docs/10/static/runtime-config-compatible.html#GUC-STANDARD-CONFORMING-STRINGS
 	`standard_conforming_strings`: {

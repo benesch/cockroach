@@ -1164,6 +1164,18 @@ func runTxnAttempt(
 		// we're about to run. e.execStmt() will take ownership and close the
 		// result.
 		stmtResult := txnResults.NewStatementResult()
+
+		// Shuffle results if the shuffle_unordered_results session variable is set
+		// and this query does not specify an ORDER BY.
+		if session.data.ShuffleUnorderedResults {
+			if s, ok := stmt.AST.(*tree.Select); ok && len(s.OrderBy) == 0 {
+				stmtResult = &shufflingResult{
+					StatementResult: stmtResult,
+					acc:             session.makeBoundAccount(),
+				}
+			}
+		}
+
 		if err := e.execSingleStatement(
 			session, stmt, pinfo,
 			txnPrefix && i == 0, /* firstInTxn */

@@ -1922,6 +1922,10 @@ func (m *sessionDataMutator) SetReadOnly(val bool) {
 	*m.curTxnReadOnly = val
 }
 
+func (m *sessionDataMutator) SetShuffleUnorderedResults(val bool) {
+	m.data.ShuffleUnorderedResults = val
+}
+
 func (m *sessionDataMutator) StopSessionTracing() error {
 	return m.sessionTracing.StopTracing()
 }

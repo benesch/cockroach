@@ -812,6 +812,9 @@ func (t *logicTest) setUser(user string) func() {
 
 	addr := t.cluster.Server(t.nodeIdx).ServingAddr()
 	pgURL, cleanupFunc := sqlutils.PGUrl(t.t, addr, "TestLogic", url.User(user))
+	q := pgURL.Query()
+	q.Set("shuffle_unordered_results", "true")
+	pgURL.RawQuery = q.Encode()
 	db, err := gosql.Open("postgres", pgURL.String())
 	if err != nil {
 		t.Fatal(err)

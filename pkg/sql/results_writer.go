@@ -17,6 +17,7 @@ package sql
 import (
 	"context"
 	"fmt"
+	"math/rand"
 
 	"github.com/cockroachdb/cockroach/pkg/sql/sem/tree"
 	"github.com/cockroachdb/cockroach/pkg/sql/sqlbase"
@@ -311,4 +312,54 @@ func (b *bufferedWriter) AddRow(ctx context.Context, row tree.Datums) error {
 	}
 	_, err := b.currentResult.Rows.AddRow(ctx, row)
 	return err
+}
+
+// shufflingResult wraps a StatementResult and shuffles the rows added to it.
+// It is meant to randomize query results when no ORDER BY is specified, much
+// like how Go maps have a random iteration order.
+type shufflingResult struct {
+	// These fields must be manually initialized.
+	StatementResult
+	acc mon.BoundAccount
+
+	// These fields are initialized automatically.
+	rows *sqlbase.RowContainer
+}
+
+const shufflingResultBatchSize = 32
+
+// SetColumns implements the StatementResult interface.
+func (s *shufflingResult) SetColumns(columns sqlbase.ResultColumns) {
+	s.rows = sqlbase.NewRowContainer(
+		s.acc, sqlbase.ColTypeInfoFromResCols(columns), shufflingResultBatchSize)
+	s.StatementResult.SetColumns(columns)
+}
+
+// AddRow implements the StatementResult interface.
+func (s *shufflingResult) AddRow(ctx context.Context, row tree.Datums) error {
+	if _, err := s.rows.AddRow(ctx, row); err != nil {
+		return err
+	}
+	if s.rows.Len() > shufflingResultBatchSize {
+		return s.flush(ctx)
+	}
+	return nil
+}
+
+// CloseResult implements the StatementResult interface.
+func (s *shufflingResult) CloseResult() error {
+	if err := s.flush(context.TODO()); err != nil {
+		return err
+	}
+	return s.StatementResult.CloseResult()
+}
+
+func (s *shufflingResult) flush(ctx context.Context) error {
+	for _, i := range rand.Perm(s.rows.Len()) {
+		if err := s.StatementResult.AddRow(ctx, s.rows.At(i)); err != nil {
+			return err
+		}
+	}
+	s.rows.Clear(ctx)
+	return nil
 }
