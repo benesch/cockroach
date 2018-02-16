@@ -1,0 +1,16 @@
+# LogicTest: default
+
+# Regression tests for logic test itself.
+
+query TT rowsort
+VALUES ('Multi line', 'strings'), ('Used to break', 'rowsort') ORDER BY 1
+----
+Used to break  rowsort
+Multi line     strings
+
+query III valuesort
+VALUES (7, 2, 4), (8, 1, 9), (3, 6, 5) ORDER BY 1
+----
+1 2 3
+4 5 6
+7 8 9

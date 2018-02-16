@@ -505,54 +505,35 @@ func (ls *logicStatement) parallelizeStmts() {
 // logicSorter sorts result rows (or not) depending on Test-Script's
 // sorting option for a "query" test. See the implementation of the
 // "query" directive below for details.
-type logicSorter func(numCols int, values []string)
+type logicSorter func(rows [][]string)
 
-type rowSorter struct {
-	numCols int
-	numRows int
-	values  []string
-}
-
-func (r rowSorter) row(i int) []string {
-	return r.values[i*r.numCols : (i+1)*r.numCols]
-}
-
-func (r rowSorter) Len() int {
-	return r.numRows
-}
-
-func (r rowSorter) Less(i, j int) bool {
-	a := r.row(i)
-	b := r.row(j)
-	for k := range a {
-		if a[k] < b[k] {
-			return true
+func rowSort(rows [][]string) {
+	sort.Slice(rows, func(i, j int) bool {
+		a := rows[i]
+		b := rows[j]
+		for k := range a {
+			if a[k] < b[k] {
+				return true
+			}
+			if a[k] > b[k] {
+				return false
+			}
 		}
-		if a[k] > b[k] {
-			return false
-		}
-	}
-	return false
-}
-
-func (r rowSorter) Swap(i, j int) {
-	a := r.row(i)
-	b := r.row(j)
-	for i := range a {
-		a[i], b[i] = b[i], a[i]
-	}
-}
-
-func rowSort(numCols int, values []string) {
-	sort.Sort(rowSorter{
-		numCols: numCols,
-		numRows: len(values) / numCols,
-		values:  values,
+		return false
 	})
 }
 
-func valueSort(numCols int, values []string) {
+func valueSort(rows [][]string) {
+	values := []string{}
+	for _, row := range rows {
+		values = append(values, row...)
+	}
 	sort.Strings(values)
+	for i := range rows {
+		for j := range rows[i] {
+			rows[i][j] = values[i+j]
+		}
+	}
 }
 
 // partialSort rearranges consecutive rows that have the same values on a
@@ -589,28 +570,12 @@ func valueSort(numCols int, values []string) {
 //   2 2                          2 3
 //   1 4                          1 4
 // and it is detected as different.
-func partialSort(numCols int, orderedCols []int, values []string) {
-	// We use rowSorter here only as a container.
-	c := rowSorter{
-		numCols: numCols,
-		numRows: len(values) / numCols,
-		values:  values,
-	}
-
-	// Sort the group of rows [rowStart, rowEnd).
-	sortGroup := func(rowStart, rowEnd int) {
-		sort.Sort(rowSorter{
-			numCols: numCols,
-			numRows: rowEnd - rowStart,
-			values:  values[rowStart*numCols : rowEnd*numCols],
-		})
-	}
-
+func partialSort(orderedCols []int, rows [][]string) {
 	groupStart := 0
-	for rIdx := 1; rIdx < c.numRows; rIdx++ {
+	for rIdx := 1; rIdx < len(rows); rIdx++ {
 		// See if this row belongs in the group with the previous row.
-		row := c.row(rIdx)
-		start := c.row(groupStart)
+		row := rows[rIdx]
+		start := rows[groupStart]
 		differs := false
 		for _, i := range orderedCols {
 			if start[i] != row[i] {
@@ -620,11 +585,11 @@ func partialSort(numCols int, orderedCols []int, values []string) {
 		}
 		if differs {
 			// Sort the group and start a new group with just this row in it.
-			sortGroup(groupStart, rIdx)
+			rowSort(rows[groupStart:rIdx])
 			groupStart = rIdx
 		}
 	}
-	sortGroup(groupStart, c.numRows)
+	rowSort(rows[groupStart:len(rows)])
 }
 
 // logicQuery represents a single query test in Test-Script.
@@ -644,9 +609,9 @@ type logicQuery struct {
 	label string
 
 	checkResults bool
-	// expectedResults indicates the expected sequence of text words
-	// when flattening a query's results.
-	expectedResults []string
+	// expectedResults stores the text words of each line. Lines are blindly split
+	// on whitespace, so a line may contain more words than there are columns.
+	expectedResults [][]string
 	// expectedResultsRaw is the same as expectedResults, but
 	// retaining the original formatting (whitespace, indentation) as
 	// the test input file. This is used for pretty-printing unexpected
@@ -655,6 +620,11 @@ type logicQuery struct {
 	// expectedHash indicates the expected hash of all result rows
 	// combined. "" indicates hash checking is disabled.
 	expectedHash string
+
+	// whitespaceForbidden indicates whether whitespace is forbidden in textual
+	// results. This is required by certain sort options, like partialsort, which
+	// need to unambiguously determine column boundaries.
+	whitespaceForbidden bool
 
 	// expectedValues indicates the number of rows expected when
 	// expectedHash is set.
@@ -1255,9 +1225,13 @@ func (t *logicTest) processSubtest(
 								return errors.Errorf("%s: invalid sort mode: %s", query.pos, opt)
 							}
 
-							query.sorter = func(numCols int, values []string) {
-								partialSort(numCols, orderedCols, values)
+							query.sorter = func(values [][]string) {
+								partialSort(orderedCols, values)
 							}
+							// We must disallow whitespace within results or we won't know
+							// whether whitespace indicates the start of a new column or
+							// another word in the same column.
+							query.whitespaceForbidden = true
 							continue
 						}
 
@@ -1311,7 +1285,7 @@ func (t *logicTest) processSubtest(
 							if len(results) == 0 {
 								break
 							}
-							query.expectedResults = append(query.expectedResults, results...)
+							query.expectedResults = append(query.expectedResults, results)
 							if !s.Scan() {
 								break
 							}
@@ -1540,13 +1514,15 @@ func (t *logicTest) execStatement(stmt logicStatement) bool {
 	return ok
 }
 
-func (t *logicTest) hashResults(results []string) (string, error) {
+func (t *logicTest) hashResults(results [][]string) (string, error) {
 	// Hash the values using MD5. This hashing precisely matches the hashing in
 	// sqllogictest.c.
 	h := md5.New()
-	for _, r := range results {
-		if _, err := h.Write(append([]byte(r), byte('\n'))); err != nil {
-			return "", err
+	for _, line := range results {
+		for _, r := range line {
+			if _, err := h.Write(append([]byte(r), byte('\n'))); err != nil {
+				return "", err
+			}
 		}
 	}
 	return fmt.Sprintf("%x", h.Sum(nil)), nil
@@ -1580,19 +1556,22 @@ func (t *logicTest) execQuery(query logicQuery) error {
 		vals[i] = new(interface{})
 	}
 
-	var results []string
-	var resultLines [][]string
+	var results [][]string
+	var resultsRaw [][]string
 	if query.colNames {
+		resultLine := []string{}
 		for _, col := range cols {
-			// We split column names on whitespace and append a separate "result"
-			// for each string. A bit unusual, but otherwise we can't match strings
+			// We split column names on whitespace and append a separate entry for
+			// each string. A bit unusual, but otherwise we can't match strings
 			// containing whitespace.
-			results = append(results, strings.Fields(col)...)
+			resultLine = append(resultLine, strings.Fields(col)...)
 		}
-		resultLines = append(resultLines, cols)
+		results = append(results, resultLine)
+		resultsRaw = append(resultsRaw, cols)
 	}
 	for rows.Next() {
 		var resultLine []string
+		var resultLineRaw []string
 		if err := rows.Scan(vals...); err != nil {
 			return err
 		}
@@ -1664,26 +1643,35 @@ func (t *logicTest) execQuery(query logicQuery) error {
 				if val == "" {
 					val = "·"
 				}
-				// We split string results on whitespace and append a separate result
-				// for each string. A bit unusual, but otherwise we can't match strings
-				// containing whitespace.
 				valStr := fmt.Sprint(val)
-				results = append(results, strings.Fields(valStr)...)
-				resultLine = append(resultLine, valStr)
+				if query.whitespaceForbidden {
+					if hasWhitespace, err := regexp.MatchString(`\pZ`, valStr); err != nil {
+						panic(fmt.Sprintf("internal logic test error: %s", err))
+					} else if hasWhitespace {
+						return fmt.Errorf(
+							"query options forbid whitespace in results, but result has whitespace: %s", val)
+					}
+				}
+				// We split string results on whitespace and append a separate entry for
+				// each string. A bit unusual, but otherwise we can't match strings
+				// containing whitespace.
+				resultLine = append(resultLine, strings.Fields(valStr)...)
+				resultLineRaw = append(resultLineRaw, valStr)
 			} else {
-				results = append(results, "NULL")
 				resultLine = append(resultLine, "NULL")
+				resultLineRaw = append(resultLineRaw, "NULL")
 			}
 		}
-		resultLines = append(resultLines, resultLine)
+		results = append(results, resultLine)
+		resultsRaw = append(resultsRaw, resultLineRaw)
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
 
 	if query.sorter != nil {
-		query.sorter(len(cols), results)
-		query.sorter(len(cols), query.expectedResults)
+		query.sorter(results)
+		query.sorter(query.expectedResults)
 	}
 
 	hash, err := t.hashResults(results)
@@ -1722,8 +1710,8 @@ func (t *logicTest) execQuery(query logicQuery) error {
 				var buf bytes.Buffer
 				tw := tabwriter.NewWriter(&buf, 2, 1, 2, ' ', 0)
 
-				for _, resultLine := range resultLines {
-					for _, value := range resultLine {
+				for _, resultRaw := range resultsRaw {
+					for _, value := range resultRaw {
 						fmt.Fprintf(tw, "%s\t", value)
 					}
 					fmt.Fprint(tw, "\n")
@@ -1756,9 +1744,9 @@ func (t *logicTest) execQuery(query logicQuery) error {
 			sortMsg = " -> ignore the following ordering of rows"
 		}
 		fmt.Fprintf(&buf, "but found (query options: %q%s) :\n", query.rawOpts, sortMsg)
-		for _, resultLine := range resultLines {
+		for _, resultRaw := range resultsRaw {
 			fmt.Fprint(tw, "    ")
-			for _, value := range resultLine {
+			for _, value := range resultRaw {
 				fmt.Fprintf(tw, "%s\t", value)
 			}
 			fmt.Fprint(tw, "\n")
